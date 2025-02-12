@@ -1,0 +1,43 @@
+{
+  "name": "matmul-gpu",
+  "version": "0.1.1",
+  "description": "A fast and efficient WebGPU powered implementation of matrix multiplication",
+  "keywords": [
+    "matrix",
+    "matrix multiplication",
+    "webgpu",
+    "gpu",
+    "fast",
+    "linear algebra"
+  ],
+  "contributors": [
+    {
+      "name": "Lee Mason"
+    },
+    {
+      "name": "Jeya Balaji Balasubramanian"
+    }
+  ],
+  "license": "ISC",
+  "homepage": "https://github.com/LKMason/matmul-gpu#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LKMason/matmul-gpu"
+  },
+  "bugs": {
+    "url": "https://github.com/LKMason/matmul-gpu/issues"
+  },
+  "main": "dist/matmul-gpu.js",
+  "module": "dist/matmul-gpu.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^4.34.6"
+  }
+}

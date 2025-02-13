@@ -36,7 +36,7 @@ matmul-gpu currently exports a single function: ``matrixMultiply``. This functio
 const product = await matrixMultiply([[1,2],[3,4]], [[5,6],[7,8]]);
 ```
 
-The ``matrixMultiply`` function is asynchronous due to its reliance on the asynchronous WebGPU API.  You must use await when calling it.
+The ``matrixMultiply`` function is asynchronous due to its reliance on the asynchronous WebGPU API.  
 
 For very large matrices, you can provide an optional third argument: the ``batchSize``.  This parameter controls the size of the batches used during the computation. Batching prevents memory errors that can occur when loading excessively large matrices into WebGPU. The default ``batchSize`` is 1024.
 

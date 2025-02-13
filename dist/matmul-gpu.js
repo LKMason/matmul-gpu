@@ -1,3 +1,24 @@
+let gpuDevice = null;
+
+async function getGpuDevice() {
+  try {
+    if (!( "gpu" in navigator)) {
+      console.warn("WebGPU not supported. CPU computation will be performed instead.");
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    gpuDevice = await adapter.requestDevice();
+    return gpuDevice;
+  } catch (e) {
+    console.error(e);
+    console.warn("A problem occured setting up interface with GPU device. CPU computation will be performed instead.");
+    return null;
+  }
+}
+
+async function isGpuAvailable() {
+  return await getGpuDevice() != null;
+}
+
 /**
  * Multiplies two 2D matrices, optionally using batched processing.
  * Uses WebGPU if available; otherwise falls back on a JS implementation.
@@ -6,14 +27,19 @@
  * @function matrixMultiply2D
  * @param {number[][]} matrix1 The first matrix (N x M).
  * @param {number[][]} matrix2 The second matrix (M x K).
- * @param {number} [batchSize=null] The size of the batches to use for processing.  If null (default),
- *  a batch size is chosen to be the maximum dimension of the input matrices, effectively resulting
- *  in no batching. Must be greater than 1 if specified.
+ * @param {object} [options={}] An object containing optional parameters.
+ * @param {number | number[]} [options.batchSize=1024] The size of the batches to use for processing.  If a single number is provided, it's used as both the row and column batch size. If an array of two numbers is provided, the first number is the row batch size and second is the column batch size. If null, uses the maximum dimension of the matrices, effectively no batching.  Must be greater than 1 if specified.
+ * @param {number} [options.operationsGpuThreshold=373248] Number of operations (N x M x K) above which the GPU is used.
  * @returns {number[][]} The resulting matrix (N x K).
  * @throws {Error} If the inner dimensions of the matrices do not match.
  * @throws {Error} If the batch size is less than 2.
  */
-async function matrixMultiply(matrix1, matrix2, batchSize=1024) {
+async function matrixMultiply(matrix1, matrix2, options={}) {
+  let { 
+    batchSize = 1024, 
+    operationsGpuThreshold = 373248, // 72 x 72 x 72
+  } = options;
+
   const N = matrix1.length;
   const M = matrix1[0].length;
   const M2 = matrix2.length;
@@ -24,39 +50,47 @@ async function matrixMultiply(matrix1, matrix2, batchSize=1024) {
   }
 
   if (batchSize == null) {
-    batchSize = Math.max(N, M, K);
+    batchSize = [Math.max(N, M, K), Math.max(N, M, K)];
   }
 
-  if (batchSize < 2) {
+  if (!Array.isArray(batchSize)) {
+    batchSize = [batchSize, batchSize];
+  }
+
+  if (batchSize[0] < 2 || batchSize[1] < 2) {
     throw new Error("Batch size must be >1");
+  }
+
+  let forceCpu = false;
+  if (N * M * K < operationsGpuThreshold) {
+    forceCpu = true;
   }
 
   // Initialize the result matrix with zeros.
   const result = Array.from({ length: N }, () => Array(K).fill(0));
 
-  const numRowBlocks1 = Math.ceil(N / batchSize);
-  const numColBlocks1 = Math.ceil(M / batchSize);
-  const numColBlocks2 = Math.ceil(K / batchSize);
+  const numRowBlocks1 = Math.ceil(N / batchSize[0]);
+  const numColBlocks1 = Math.ceil(M / batchSize[1]);
+  const numColBlocks2 = Math.ceil(K / batchSize[1]);
 
   for (let i = 0; i < numRowBlocks1; i++) {
     for (let j = 0; j < numColBlocks2; j++) {
       for (let k = 0; k < numColBlocks1; k++) {
         
         // Calculate block indices (start and end rows/cols)
-        const rowStart1 = i * batchSize;
-        const rowEnd1 = Math.min((i + 1) * batchSize, N);
-        const colStart1 = k * batchSize;
-        const colEnd1 = Math.min((k + 1) * batchSize, M);
+        const rowStart1 = i * batchSize[0];
+        const rowEnd1 = Math.min((i + 1) * batchSize[0], N);
+        const colStart1 = k * batchSize[1];
+        const colEnd1 = Math.min((k + 1) * batchSize[1], M);
 
-        const rowStart2 = k * batchSize;
-        const rowEnd2 = Math.min((k + 1) * batchSize, M);
-        const colStart2 = j * batchSize;
-        const colEnd2 = Math.min((j + 1) * batchSize, K);
-
+        const rowStart2 = k * batchSize[1];
+        const rowEnd2 = Math.min((k + 1) * batchSize[1], M);
+        const colStart2 = j * batchSize[1];
+        const colEnd2 = Math.min((j + 1) * batchSize[1], K);
           
         // Multiply and accumulate
         const product =  await _matrixMultiplySlice(matrix1, matrix2, 
-          [[rowStart1, rowEnd1],[colStart1, colEnd1]],[[rowStart2, rowEnd2],[colStart2, colEnd2]]);
+          [[rowStart1, rowEnd1],[colStart1, colEnd1]],[[rowStart2, rowEnd2],[colStart2, colEnd2]], forceCpu);
 
         for (let pRow = 0; pRow < product.length; pRow++) {
           for (let pCol = 0; pCol < product[0].length; pCol++) {
@@ -70,23 +104,25 @@ async function matrixMultiply(matrix1, matrix2, batchSize=1024) {
   return result;
 }
 
-async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
+async function _matrixMultiplySlice(A, B, aSlice, bSlice, forceCpu = false) {
  const slicedARows = aSlice[0][1] - aSlice[0][0];
  const slicedACols = aSlice[1][1] - aSlice[1][0];
  const slicedBRows = bSlice[0][1] - bSlice[0][0];
  const slicedBCols = bSlice[1][1] - bSlice[1][0];
 
- // Check WebGPU availability
- if (!("gpu" in navigator)) {
-   console.error("WebGPU not supported. Falling back to CPU multiplication.");
-   return _cpuMatrixMultiply(A, B, aSlice, bSlice);
- }
+ if (forceCpu) {
+  return _cpuMatrixMultiply(A, B, aSlice, bSlice);
+} 
+
+const gpuDevice = await getGpuDevice();
+if (!gpuDevice) {
+  console.warn("No GPU device available. Falling back to CPU multiplication.");
+  return _cpuMatrixMultiply(A, B, aSlice, bSlice);
+}
+
 
  // Try GPU multiplication in a try/catch
  try {
-   const adapter = await navigator.gpu.requestAdapter();
-   const device = await adapter.requestDevice();
-
    // Flatten A, using the slice
    const Adata = new Float32Array(slicedARows * slicedACols);
    let idx = 0;
@@ -106,11 +142,11 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
    }
 
    // Prepare buffers
-   const bufferA = device.createBuffer({
+   const bufferA = gpuDevice.createBuffer({
      size: Adata.byteLength,
      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
    });
-   const bufferB = device.createBuffer({
+   const bufferB = gpuDevice.createBuffer({
      size: Bdata.byteLength,
      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
    });
@@ -119,7 +155,7 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
    const cCols = slicedBCols;
    const cSizeBytes = 4 * cRows * cCols;
 
-   const bufferC = device.createBuffer({
+   const bufferC = gpuDevice.createBuffer({
      size: cSizeBytes,
      usage:
        GPUBufferUsage.STORAGE |
@@ -128,16 +164,16 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
    });
 
    // Uniform buffer {slicedARows, slicedACols, slicedBCols, 0}
-   const uniformBuffer = device.createBuffer({
+   const uniformBuffer = gpuDevice.createBuffer({
      size: 16, // 4 x 4 bytes
      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
    });
 
    // Upload data
-   device.queue.writeBuffer(bufferA, 0, Adata);
-   device.queue.writeBuffer(bufferB, 0, Bdata);
+   gpuDevice.queue.writeBuffer(bufferA, 0, Adata);
+   gpuDevice.queue.writeBuffer(bufferB, 0, Bdata);
    const dims = new Uint32Array([slicedARows, slicedACols, slicedBCols, 0]);
-   device.queue.writeBuffer(uniformBuffer, 0, dims);
+   gpuDevice.queue.writeBuffer(uniformBuffer, 0, dims);
 
    // WGSL shader
    const shaderCode = /* wgsl */ `
@@ -165,10 +201,10 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
          }
        }
      `;
-   const shaderModule = device.createShaderModule({ code: shaderCode });
+   const shaderModule = gpuDevice.createShaderModule({ code: shaderCode });
 
    // Pipeline
-   const pipeline = device.createComputePipeline({
+   const pipeline = gpuDevice.createComputePipeline({
      layout: "auto",
      compute: {
        module: shaderModule,
@@ -177,7 +213,7 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
    });
 
    // Bind group
-   const bindGroup = device.createBindGroup({
+   const bindGroup = gpuDevice.createBindGroup({
      layout: pipeline.getBindGroupLayout(0),
      entries: [
        { binding: 0, resource: { buffer: bufferA } },
@@ -188,7 +224,7 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
    });
 
    // Encode commands
-   const commandEncoder = device.createCommandEncoder();
+   const commandEncoder = gpuDevice.createCommandEncoder();
    const passEncoder = commandEncoder.beginComputePass();
    passEncoder.setPipeline(pipeline);
    passEncoder.setBindGroup(0, bindGroup);
@@ -201,14 +237,14 @@ async function _matrixMultiplySlice(A, B, aSlice, bSlice) {
    passEncoder.end();
 
    // Copy back to a CPU-readable buffer
-   const readBuffer = device.createBuffer({
+   const readBuffer = gpuDevice.createBuffer({
      size: cSizeBytes,
      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
    });
    commandEncoder.copyBufferToBuffer(bufferC, 0, readBuffer, 0, cSizeBytes);
 
    // Submit
-   device.queue.submit([commandEncoder.finish()]);
+   gpuDevice.queue.submit([commandEncoder.finish()]);
    await readBuffer.mapAsync(GPUMapMode.READ);
    const arrBuffer = readBuffer.getMappedRange();
    const result = new Float32Array(arrBuffer.slice(0));
@@ -256,4 +292,4 @@ function _cpuMatrixMultiply(A, B, aSlice, bSlice) {
   return C;
 }
 
-export { matrixMultiply };
+export { isGpuAvailable, matrixMultiply };

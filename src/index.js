@@ -36,6 +36,21 @@ export async function isGpuAvailable() {
  * @throws {Error} If the batch size is less than 2.
  */
 export async function matrixMultiply(matrix1, matrix2, options={}) {
+  const generator = matrixMultiplyProgress(matrix1, matrix2, options);
+  let result = await generator.next();
+  let previousValue = null;
+  while (!result.done) {
+    previousValue = result.value;
+    result = await generator.next();
+  }
+  return previousValue;
+}
+
+/**
+ * Same as matrixMultiply, but as a generator. For each block operation, yields an object with single property 'progress' representing proportion of block operations completed.
+ * When done, yields the multiplied matrix.
+ */
+export async function* matrixMultiplyProgress(matrix1, matrix2, options={}) {
   let { 
     batchSize = 1024, 
     operationsGpuThreshold = 373248, // 72 x 72 x 72
@@ -74,6 +89,9 @@ export async function matrixMultiply(matrix1, matrix2, options={}) {
   const numColBlocks1 = Math.ceil(M / batchSize[1]);
   const numColBlocks2 = Math.ceil(K / batchSize[1]);
 
+  const totalBlockOperations = numRowBlocks1 * numColBlocks2 * numColBlocks1;
+  let countBlockOpertaions = 0;
+
   for (let i = 0; i < numRowBlocks1; i++) {
     for (let j = 0; j < numColBlocks2; j++) {
       for (let k = 0; k < numColBlocks1; k++) {
@@ -98,11 +116,15 @@ export async function matrixMultiply(matrix1, matrix2, options={}) {
             result[rowStart1 + pRow][colStart2 + pCol] += product[pRow][pCol];
           }
         }
+
+        countBlockOpertaions++;
+
+        yield { progress: countBlockOpertaions / totalBlockOperations}
       }
     }
   }
 
-  return result;
+  yield result;
 }
 
 async function _matrixMultiplySlice(A, B, aSlice, bSlice, forceCpu = false) {
